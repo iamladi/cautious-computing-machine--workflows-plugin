@@ -1,23 +1,48 @@
 #!/usr/bin/env bash
 #
-# comments-ralph.sh - Autonomous comment resolution loop
+# comments-ralph.sh - Autonomous comment resolution loop (AFK Ralph pattern)
 #
 # Continuously monitors and resolves PR review comments until all resolved or max iterations.
 # Called by workflow-ralph.sh after CI passes.
 #
+# Features:
+#   - Docker sandbox mode for AFK safety (USE_SANDBOX=true)
+#   - YOLO mode to skip permission prompts (YOLO_MODE=true)
+#   - jq streaming for real-time output
+#
 # Usage:
 #   ./scripts/comments-ralph.sh <pr-number>
 #
-# Flow:
-#   1. Parse and validate PR number argument
-#   2. Count pending/unresolved comments
-#   3. If pending comments exist, invoke /workflows:resolve-comments
-#   4. Stage, commit, and push changes
-#   5. Wait for reviewer response (configurable interval)
-#   6. Repeat up to MAX_COMMENT_ITERATIONS times
-#   7. Exit with success when all resolved, failure on max iterations
+#   # Full AFK mode (Docker + YOLO) - default
+#   ./comments-ralph.sh 123
+#
+#   # No sandbox (faster, less safe)
+#   USE_SANDBOX=false ./comments-ralph.sh 123
+#
+#   # Interactive mode (keep permission prompts)
+#   YOLO_MODE=false ./comments-ralph.sh 123
 
 set -euo pipefail
+
+# ============================================================================
+# AFK Ralph Configuration
+# ============================================================================
+
+# Docker sandbox mode (default: enabled for AFK safety)
+USE_SANDBOX="${USE_SANDBOX:-true}"
+
+# YOLO mode - skip all permission prompts
+YOLO_MODE="${YOLO_MODE:-true}"
+
+# Temp files for signal capture
+TMPDIR="${TMPDIR:-/tmp}"
+SIGNAL_LOG=""
+
+# jq filter for streaming assistant text
+JQ_STREAM='select(.type == "assistant").message.content[]? | select(.type == "text").text // empty'
+
+# jq filter for final result
+JQ_RESULT='select(.type == "result").result // empty'
 
 # ============================================================================
 # Configuration
@@ -26,6 +51,29 @@ set -euo pipefail
 readonly NOTIFICATION_LOG="$HOME/.workflow-notifications.log"
 readonly MAX_COMMENT_ITERATIONS="${MAX_COMMENT_ITERATIONS:-10}"
 readonly REVIEWER_WAIT_TIME="${REVIEWER_WAIT_TIME:-300}"  # 5 minutes default
+readonly VERBOSE="${VERBOSE:-false}"
+
+# ============================================================================
+# Cleanup and Trap Handler
+# ============================================================================
+
+cleanup() {
+    local exit_code=$?
+    echo ""
+    echo "Cleaning up..."
+
+    # Remove temp files
+    [ -n "$SIGNAL_LOG" ] && [ -f "$SIGNAL_LOG" ] && rm -f "$SIGNAL_LOG"
+
+    # Stop Docker sandbox if running
+    if [ "$USE_SANDBOX" = "true" ]; then
+        docker sandbox stop claude 2>/dev/null || true
+    fi
+
+    exit $exit_code
+}
+
+trap cleanup EXIT SIGINT SIGTERM
 
 # ============================================================================
 # Utilities
@@ -62,6 +110,13 @@ Arguments:
 Example:
   $0 123
 
+Environment Variables:
+  USE_SANDBOX              Docker sandbox mode (default: true)
+  YOLO_MODE                Skip permission prompts (default: true)
+  MAX_COMMENT_ITERATIONS   Max resolution cycles (default: 10)
+  REVIEWER_WAIT_TIME       Wait time between cycles in seconds (default: 300)
+  VERBOSE                  Show raw jq output (default: false)
+
 The script will:
   1. Count pending/unresolved PR comments
   2. Invoke /workflows:resolve-comments if needed
@@ -70,16 +125,118 @@ The script will:
   5. Repeat up to $MAX_COMMENT_ITERATIONS times
   6. Exit success when all comments resolved
 
-Environment Variables:
-  MAX_COMMENT_ITERATIONS    Max resolution cycles (default: 10)
-  REVIEWER_WAIT_TIME        Wait time between cycles in seconds (default: 300)
-
-Configuration:
-  MAX_COMMENT_ITERATIONS=$MAX_COMMENT_ITERATIONS
-  REVIEWER_WAIT_TIME=${REVIEWER_WAIT_TIME}s between resolution cycles
-
 EOF
     exit 1
+}
+
+# ============================================================================
+# Claude Invocation Function
+# ============================================================================
+
+run_claude() {
+    local prompt="$1"
+    local capture_file="${2:-}"
+
+    # Build command
+    local cmd=""
+    if [ "$USE_SANDBOX" = "true" ]; then
+        cmd="docker sandbox run --credentials host claude"
+    else
+        cmd="claude"
+    fi
+
+    # Add YOLO mode
+    if [ "$YOLO_MODE" = "true" ]; then
+        cmd="$cmd --dangerously-skip-permissions"
+    fi
+
+    # Add output format
+    cmd="$cmd --print --output-format stream-json"
+
+    # Create temp file for capture
+    SIGNAL_LOG=$(mktemp "$TMPDIR/ralph-signal.XXXXXX")
+
+    # Execute with streaming + capture
+    if [ "$VERBOSE" = "true" ]; then
+        eval "$cmd \"$prompt\"" 2>&1 \
+            | grep --line-buffered '^{' \
+            | tee "$SIGNAL_LOG" \
+            | jq --unbuffered -rj "$JQ_STREAM"
+    else
+        eval "$cmd \"$prompt\"" 2>&1 \
+            | grep --line-buffered '^{' \
+            | tee "$SIGNAL_LOG" \
+            | jq --unbuffered -rj "$JQ_STREAM" 2>/dev/null || true
+    fi
+
+    local exit_code=${PIPESTATUS[0]}
+
+    # Extract final result if capture file specified
+    if [ -n "$capture_file" ]; then
+        jq -r "$JQ_RESULT" "$SIGNAL_LOG" > "$capture_file" 2>/dev/null || true
+    fi
+
+    return $exit_code
+}
+
+# ============================================================================
+# Signal Detection
+# ============================================================================
+
+check_completion() {
+    local log_file="$1"
+
+    if grep -q '<promise>COMPLETE</promise>' "$log_file" 2>/dev/null; then
+        return 0  # Complete
+    elif grep -q '<promise>FAILED</promise>' "$log_file" 2>/dev/null; then
+        return 1  # Failed
+    fi
+    return 2  # Continue
+}
+
+# ============================================================================
+# Comment Utility Functions
+# ============================================================================
+
+# Get repository info (owner/repo)
+get_repo_info() {
+    local repo
+    repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+
+    if [ -z "$repo" ]; then
+        # Fallback: parse from git remote
+        repo=$(git remote get-url origin 2>/dev/null | sed -E 's|.*github.com[:/](.+/.+)\.git.*|\1|')
+    fi
+
+    if [ -z "$repo" ]; then
+        error "Could not determine repository (owner/repo)"
+    fi
+
+    echo "$repo"
+}
+
+# Count pending PR comments
+count_pending_comments() {
+    local pr="$1"
+    local repo
+    repo=$(get_repo_info)
+
+    # Get PR review comments (top-level only)
+    local review_comments
+    review_comments=$(gh api "repos/$repo/pulls/$pr/comments" --jq '[.[] | select(.in_reply_to_id == null)] | length' 2>/dev/null || echo "0")
+
+    # Get review status
+    local reviews_json
+    reviews_json=$(gh pr view "$pr" --json reviews -q '.reviews' 2>/dev/null || echo "[]")
+
+    # Count reviews that are "CHANGES_REQUESTED"
+    local changes_requested
+    changes_requested=$(echo "$reviews_json" | jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length' 2>/dev/null || echo "0")
+
+    # Total pending = review comments + changes_requested reviews
+    local total=$((review_comments + changes_requested))
+
+    echo "$total"
 }
 
 # ============================================================================
@@ -100,174 +257,88 @@ fi
 WORKFLOW_ID="pr-$PR_NUMBER"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Comments Ralph - Autonomous Comment Resolution"
+echo "Comments Ralph - AFK Autonomous Comment Resolution"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "PR Number: #$PR_NUMBER"
+echo "Sandbox: $USE_SANDBOX"
+echo "YOLO Mode: $YOLO_MODE"
 echo "Max Iterations: $MAX_COMMENT_ITERATIONS"
 echo "Reviewer Wait Time: ${REVIEWER_WAIT_TIME}s"
 echo ""
 
-notify "STARTED" "$WORKFLOW_ID" "COMMENT_RESOLUTION" "Beginning comment resolution loop for PR #$PR_NUMBER"
-
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-# Get repository info (owner/repo)
-# Returns: "owner/repo" format
-get_repo_info() {
-    # Try to get from gh CLI
-    local repo
-    repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
-
-    if [ -z "$repo" ]; then
-        # Fallback: parse from git remote
-        repo=$(git remote get-url origin 2>/dev/null | sed -E 's|.*github.com[:/](.+/.+)\.git.*|\1|')
-    fi
-
-    if [ -z "$repo" ]; then
-        error "Could not determine repository (owner/repo)"
-    fi
-
-    echo "$repo"
-}
-
-# Count pending PR comments
-# Args: pr_number
-# Returns: integer count of unresolved comments
-count_pending_comments() {
-    local pr="$1"
-    local repo
-    repo=$(get_repo_info)
-
-    # Get PR review comments and regular comments
-    # Review comments can have an in_reply_to_id (threaded)
-    # We'll count top-level unresolved review comments
-    local review_comments
-    review_comments=$(gh api "repos/$repo/pulls/$pr/comments" --jq '[.[] | select(.in_reply_to_id == null)] | length' 2>/dev/null || echo "0")
-
-    # Get PR issue comments (general comments not tied to code)
-    local issue_comments
-    issue_comments=$(gh api "repos/$repo/issues/$pr/comments" --jq 'length' 2>/dev/null || echo "0")
-
-    # Get review status
-    local reviews_json
-    reviews_json=$(gh pr view "$pr" --json reviews -q '.reviews' 2>/dev/null || echo "[]")
-
-    # Count reviews that are "CHANGES_REQUESTED"
-    local changes_requested
-    changes_requested=$(echo "$reviews_json" | jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length' 2>/dev/null || echo "0")
-
-    # Total pending = review comments + issue comments + changes requested reviews
-    # Note: This is a simplistic count. In real scenarios, we'd filter for resolved vs unresolved.
-    # For MVP, we'll count all review comments + changes_requested reviews
-    local total=$((review_comments + changes_requested))
-
-    echo "$total"
-}
-
-# Check if PR has pending comments or requested changes
-# Args: pr_number
-# Returns: 0 if comments exist, 1 if none
-has_pending_comments() {
-    local pr="$1"
-    local count
-    count=$(count_pending_comments "$pr")
-
-    if [ "$count" -gt 0 ]; then
-        return 0
-    else
-        return 1
-    fi
-}
+notify "STARTED" "$WORKFLOW_ID" "COMMENT_RESOLUTION" "Beginning comment resolution loop (sandbox=$USE_SANDBOX, yolo=$YOLO_MODE)"
 
 # ============================================================================
 # Main Comment Resolution Loop
 # ============================================================================
 
-ITERATION=1
-
-while [ $ITERATION -le $MAX_COMMENT_ITERATIONS ]; do
+for ((i=1; i<=MAX_COMMENT_ITERATIONS; i++)); do
     echo ""
-    echo "━━━ Comment Resolution Iteration $ITERATION/$MAX_COMMENT_ITERATIONS ━━━"
+    echo "━━━ Comment Resolution $i/$MAX_COMMENT_ITERATIONS ━━━"
     echo ""
 
     # Count pending comments
     echo "Checking for pending comments on PR #$PR_NUMBER..."
-    PENDING_COUNT=$(count_pending_comments "$PR_NUMBER")
+    PENDING=$(count_pending_comments "$PR_NUMBER")
 
-    echo "Pending comments/reviews: $PENDING_COUNT"
+    echo "Pending comments/reviews: $PENDING"
 
-    if [ "$PENDING_COUNT" -eq 0 ]; then
+    if [ "$PENDING" -eq 0 ]; then
         echo ""
-        echo "✓ No pending comments or requested changes!"
-        notify "SUCCESS" "$WORKFLOW_ID" "COMMENTS_RESOLVED" "All comments resolved after $ITERATION iteration(s)"
+        echo "✓ All comments resolved!"
+        notify "SUCCESS" "$WORKFLOW_ID" "COMMENTS_RESOLVED" "All comments resolved after $i iteration(s)"
         exit 0
     fi
 
     # Comments exist, invoke resolve-comments command
     echo ""
-    echo "Found $PENDING_COUNT pending comment(s)/review(s)"
-    echo "Invoking /workflows:resolve-comments to address feedback..."
-    notify "PROGRESS" "$WORKFLOW_ID" "RESOLVE_COMMENTS" "Resolving comments (iteration $ITERATION/$MAX_COMMENT_ITERATIONS)"
+    echo "Resolving $PENDING pending comments..."
+    notify "PROGRESS" "$WORKFLOW_ID" "RESOLVE_COMMENTS" "Resolving comments (iteration $i/$MAX_COMMENT_ITERATIONS)"
 
-    if ! claude -p "/workflows:resolve-comments $PR_NUMBER" --output-format stream-json 2>&1; then
-        echo "Warning: /workflows:resolve-comments command failed"
-        notify "ERROR" "$WORKFLOW_ID" "RESOLVE_FAILED" "Command failed at iteration $ITERATION"
-        # Continue to next iteration anyway
-    fi
+    run_claude "/workflows:resolve-comments $PR_NUMBER --all" || true
 
-    # Stage and commit changes made by resolve-comments
+    # Commit and push if changes
     echo ""
     echo "Staging and committing resolution changes..."
 
-    if git diff --quiet && git diff --staged --quiet; then
-        echo "No changes to commit (resolve-comments may not have made changes)"
-        echo "This could indicate:"
-        echo "  - Comments are discussion-only (no code changes needed)"
-        echo "  - Comments were already resolved"
-        echo "  - Resolution requires manual intervention"
-        echo ""
-        echo "Continuing to next iteration..."
-    else
+    if ! git diff --quiet || ! git diff --staged --quiet; then
         git add .
-        if ! git commit -m "fix(review): address review comments (iteration $ITERATION)
+        git commit -m "fix(review): address comments (attempt $i)
 
-Applied changes from /workflows:resolve-comments (iteration $ITERATION/$MAX_COMMENT_ITERATIONS)"; then
-            echo "Warning: git commit failed"
-        fi
+Applied changes from /workflows:resolve-comments (iteration $i/$MAX_COMMENT_ITERATIONS)" || echo "Warning: commit failed"
 
         # Push changes
         echo ""
         echo "Pushing resolution changes..."
-        PUSH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
         if ! git push origin HEAD 2>&1; then
-            echo "Warning: git push failed"
-            notify "ERROR" "$WORKFLOW_ID" "PUSH_FAILED" "Push failed at iteration $ITERATION"
+            notify "ERROR" "$WORKFLOW_ID" "PUSH_FAILED" "Push failed at iteration $i"
             error "Failed to push changes"
         fi
 
-        echo "Changes pushed at $PUSH_TIME"
+        echo "Changes pushed"
+    else
+        echo "No changes to commit (resolve-comments may not have made changes)"
+        echo "This could indicate:"
+        echo "  - Comments are discussion-only"
+        echo "  - Comments were already resolved"
+        echo "  - Resolution requires manual intervention"
     fi
 
     # Wait for reviewer response before checking again
-    # Only wait if we haven't reached max iterations
-    if [ $ITERATION -lt $MAX_COMMENT_ITERATIONS ]; then
+    if [ $i -lt $MAX_COMMENT_ITERATIONS ]; then
         echo ""
-        echo "Waiting ${REVIEWER_WAIT_TIME}s for reviewer response..."
-        notify "PROGRESS" "$WORKFLOW_ID" "WAITING" "Waiting for reviewer feedback (iteration $ITERATION)"
+        echo "Waiting ${REVIEWER_WAIT_TIME}s for reviewer..."
+        notify "PROGRESS" "$WORKFLOW_ID" "WAITING" "Waiting for reviewer feedback (iteration $i)"
 
         # Show countdown in minutes for long waits
         if [ $REVIEWER_WAIT_TIME -ge 60 ]; then
-            local minutes=$((REVIEWER_WAIT_TIME / 60))
+            minutes=$((REVIEWER_WAIT_TIME / 60))
             echo "Waiting $minutes minute(s)..."
         fi
 
         sleep "$REVIEWER_WAIT_TIME"
     fi
-
-    ITERATION=$((ITERATION + 1))
 done
 
 # Max iterations reached
