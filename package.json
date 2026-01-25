@@ -1,0 +1,15 @@
+{
+  "name": "workflows-plugin",
+  "version": "0.1.0",
+  "description": "Autonomous workflow orchestration for the full SDLC pipeline",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate": "bun run scripts/validate-plugin.ts",
+    "validate:versions": "bun run scripts/validate-versions.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "zod": "^3.23.8"
+  }
+}

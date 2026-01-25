@@ -1,0 +1,30 @@
+# Workflow Progress
+# Generated: {{TIMESTAMP}}
+# Research: {{RESEARCH_FILE}}
+# Worktree: {{WORKTREE_PATH}}
+# Branch: {{BRANCH_NAME}}
+
+## Status
+current_phase: {{CURRENT_PHASE}}
+iteration: {{ITERATION}}
+started_at: {{STARTED_AT}}
+last_update: {{LAST_UPDATE}}
+
+## Plans
+total: {{PLANS_TOTAL}}
+completed: {{PLANS_COMPLETED}}
+{{PLANS_LIST}}
+
+## PR
+number: {{PR_NUMBER}}
+url: {{PR_URL}}
+ci_status: {{CI_STATUS}}
+ci_attempts: {{CI_ATTEMPTS}}
+
+## Comments
+total: {{COMMENTS_TOTAL}}
+resolved: {{COMMENTS_RESOLVED}}
+pending: {{COMMENTS_PENDING}}
+
+## Signals
+{{SIGNALS_LIST}}
