@@ -12,12 +12,12 @@ last_update: 2026-01-25T18:05:00Z
 
 ## Plans
 total: 5
-completed: 3
+completed: 4
 - [x] plans/workflow-1-foundation.md (issue: #4)
 - [x] plans/workflow-2-testing-infrastructure.md (issue: #5)
 - [x] plans/workflow-3-error-detection-phases.md (issue: #6)
-- [ ] plans/workflow-4-adapters.md (issue: #7) <- CURRENT
-- [ ] plans/workflow-5-orchestration-e2e.md (issue: #8)
+- [x] plans/workflow-4-adapters.md (issue: #7)
+- [ ] plans/workflow-5-orchestration-e2e.md (issue: #8) <- CURRENT
 
 ## PR
 number: null
