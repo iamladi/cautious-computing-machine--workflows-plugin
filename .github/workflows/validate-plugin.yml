@@ -25,6 +25,12 @@ jobs:
       - name: Validate plugin (versions, schema, skills, docs)
         run: bun run validate
 
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Run tests
+        run: bun test
+
       - name: Validate shell scripts syntax
         run: |
           for script in scripts/*.sh; do
