@@ -101,18 +101,24 @@ Emit signals for external script coordination:
      - Splitting into multiple plans (complexity ≤ 5)
      - Creating GitHub issues for each plan
    - Capture generated plan paths and issue numbers
+   - If skill fails or no plans generated, stop with error
 
-2. **Update progress file**
+2. **Validate plan generation**
+   - Verify at least one plan was created
+   - Verify each plan has a GitHub issue number
+   - If validation fails, emit error signal: `<phase>ERROR:PLANNING:validation_failed</phase>`
+
+3. **Update progress file**
    - Set `total` to number of plans
    - List all plans with issue numbers
    - Mark first plan as CURRENT
 
-3. **Emit signal**
+4. **Emit signal**
    ```
    <phase>PLANNING_COMPLETE</phase>
    ```
 
-4. **Update progress**
+5. **Update progress**
    - Set `current_phase: IMPLEMENTATION`
    - Update `last_update`
 
