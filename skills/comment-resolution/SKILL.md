@@ -75,49 +75,58 @@ echo "Working on branch: $CURRENT_BRANCH"
 
 ### Step 3: Fetch ALL Comments
 
-Fetch all comment types from GitHub API:
+Fetch all comment types from GitHub API using a reusable function:
 
-#### Review Comments (file/line level)
 ```bash
-# Get review comments with file paths and line numbers
-gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" \
-  --jq '.[] | {
-    id: .id,
-    type: "review",
-    path: .path,
-    line: (.line // .original_line),
-    body: .body,
-    user: .user.login,
-    created_at: .created_at,
-    in_reply_to_id: .in_reply_to_id
-  }'
-```
+# Reusable function to fetch all comment types
+fetch_all_comments() {
+  local owner="$1"
+  local repo="$2"
+  local pr_number="$3"
 
-#### Review-Level Comments
-```bash
-# Get reviews with overall comments
-gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/reviews" \
-  --jq '.[] | select(.body != null and .body != "") | {
-    id: .id,
-    type: "review-summary",
-    body: .body,
-    user: .user.login,
-    state: .state,
-    created_at: .submitted_at
-  }'
-```
+  # Review Comments (file/line level)
+  local review_comments=$(gh api "repos/$owner/$repo/pulls/$pr_number/comments" \
+    --jq '.[] | {
+      id: .id,
+      type: "review",
+      path: .path,
+      line: (.line // .original_line),
+      body: .body,
+      user: .user.login,
+      created_at: .created_at,
+      in_reply_to_id: .in_reply_to_id
+    }')
 
-#### Issue Comments (general PR comments)
-```bash
-# Get general PR discussion comments
-gh api "repos/$OWNER/$REPO/issues/$PR_NUMBER/comments" \
-  --jq '.[] | {
-    id: .id,
-    type: "issue",
-    body: .body,
-    user: .user.login,
-    created_at: .created_at
-  }'
+  # Review-Level Comments
+  local review_summaries=$(gh api "repos/$owner/$repo/pulls/$pr_number/reviews" \
+    --jq '.[] | select(.body != null and .body != "") | {
+      id: .id,
+      type: "review-summary",
+      body: .body,
+      user: .user.login,
+      state: .state,
+      created_at: .submitted_at
+    }')
+
+  # Issue Comments (general PR comments)
+  local issue_comments=$(gh api "repos/$owner/$repo/issues/$pr_number/comments" \
+    --jq '.[] | {
+      id: .id,
+      type: "issue",
+      body: .body,
+      user: .user.login,
+      created_at: .created_at
+    }')
+
+  # Combine all comments into single JSON array
+  jq -n --argjson rc "$review_comments" \
+        --argjson rs "$review_summaries" \
+        --argjson ic "$issue_comments" \
+        '$rc + $rs + $ic'
+}
+
+# Fetch initial comments
+ALL_COMMENTS=$(fetch_all_comments "$OWNER" "$REPO" "$PR_NUMBER")
 ```
 
 ### Step 4: Filter Comments
@@ -156,6 +165,9 @@ ITERATION=1
 MAX_ITERATIONS=10  # Safety limit to prevent infinite loops
 
 while [ $ITERATION -le $MAX_ITERATIONS ]; do
+  # Capture timestamp at START of iteration to track new comments
+  LAST_CHECK_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "Iteration $ITERATION: Processing comments..."
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -171,7 +183,8 @@ while [ $ITERATION -le $MAX_ITERATIONS ]; do
   echo "Found $UNADDRESSED_COUNT unaddressed comments"
 
   # Process each comment using comment-resolver agent
-  jq -c '.[]' "$STATE_FILE" | while read -r comment; do
+  # Use process substitution to avoid subshell scope issues
+  while read -r comment; do
     COMMENT_ID=$(echo "$comment" | jq -r '.id')
 
     # Invoke comment-resolver agent
@@ -185,18 +198,17 @@ while [ $ITERATION -le $MAX_ITERATIONS ]; do
     # Mark comment as addressed (remove from state)
     jq "map(select(.id != $COMMENT_ID))" "$STATE_FILE" > "$STATE_FILE.tmp"
     mv "$STATE_FILE.tmp" "$STATE_FILE"
-  done
+  done < <(jq -c '.[]' "$STATE_FILE")
 
   # After processing all current comments, check for NEW comments
   # (reviewers may have replied or added new comments)
   echo ""
   echo "Checking for new comments from reviewers..."
 
-  # Refetch comments
-  NEW_COMMENTS=$(/* same fetch logic as Step 3 */)
+  # Refetch comments using reusable function
+  NEW_COMMENTS=$(fetch_all_comments "$OWNER" "$REPO" "$PR_NUMBER")
 
   # Filter to only NEW comments (created after our last check)
-  LAST_CHECK_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   TRULY_NEW=$(echo "$NEW_COMMENTS" | jq --arg since "$LAST_CHECK_TIME" \
     'map(select(.created_at > $since))')
 
