@@ -45,14 +45,30 @@ Address PR review comments autonomously.
 **Arguments:**
 - `pr-number` - GitHub PR number to resolve comments for
 
+## Internal Phase Commands
+
+The TypeScript runner executes phases as separate Claude CLI subprocesses. These commands are not meant for direct user invocation but are exposed for debugging and advanced usage.
+
+- **/phase-setup** - Create worktree, initialize progress file
+- **/phase-plan** - Split research into implementation plans
+- **/phase-impl** - Execute a single implementation plan
+- **/phase-submit** - Create and push the PR
+- **/phase-verify-ci** - Check CI status for the PR
+- **/phase-fix-ci** - Analyze and fix CI failures
+- **/phase-resolve-comments** - Process and resolve PR review comments
+
+Each phase emits XML-style signals that the runner parses to track state transitions.
+
 ## Workflow Phases
 
-The build command executes four phases:
+The build command executes the following phases:
 
 1. **Setup** - Create isolated worktree, initialize progress tracking
 2. **Planning** - Generate implementation plans from research
 3. **Implementation** - Execute each plan sequentially
 4. **Submission** - Create and push PR
+5. **CI Resolution** - Monitor and fix CI failures (loops until green)
+6. **Comment Resolution** - Address reviewer feedback (loops until resolved)
 
 ## Progress Tracking
 
@@ -141,18 +157,39 @@ bun run validate
 ```
 workflows-plugin/
 ├── .claude-plugin/
-│   └── plugin.json          # Plugin manifest
+│   └── plugin.json              # Plugin manifest
+├── src/                         # TypeScript runner infrastructure
+│   ├── cli.ts                   # CLI entry point
+│   ├── index.ts                 # Library exports
+│   ├── types.ts                 # Type definitions
+│   ├── adapters/
+│   │   └── claude-cli-adapter.ts
+│   ├── runner/
+│   │   ├── workflow-runner.ts   # Main orchestration loop
+│   │   ├── signal-parser.ts     # Parse XML signals
+│   │   ├── progress-writer.ts   # Progress file I/O
+│   │   └── phase-mapper.ts      # Map phases to commands
+│   └── workflows/
+│       └── main.workflow.ts     # XState machine
 ├── commands/
-│   └── build.md             # Main workflow command
+│   ├── build.md                 # Main workflow command
+│   ├── phase-setup.md           # Setup phase
+│   ├── phase-plan.md            # Planning phase
+│   ├── phase-impl.md            # Implementation phase
+│   ├── phase-submit.md          # PR submission phase
+│   ├── phase-verify-ci.md       # CI verification phase
+│   ├── phase-fix-ci.md          # CI fix phase
+│   └── phase-resolve-comments.md
 ├── templates/
 │   └── progress.txt.template
 ├── scripts/
-│   ├── workflow-ralph.sh    # Main orchestrator script
-│   ├── ci-ralph.sh          # CI resolution loop
-│   ├── comments-ralph.sh    # Comment resolution loop
+│   ├── workflow-ralph.sh        # Shell-based orchestrator
+│   ├── ci-ralph.sh
+│   ├── comments-ralph.sh
 │   ├── validate-plugin.ts
 │   └── validate-versions.ts
 ├── package.json
+├── tsconfig.json
 ├── README.md
 └── CHANGELOG.md
 ```
