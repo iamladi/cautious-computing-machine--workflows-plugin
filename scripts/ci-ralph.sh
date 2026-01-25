@@ -280,12 +280,14 @@ while [ $ITERATION -le $MAX_CI_ITERATIONS ]; do
             # Get error hash for stuck detection
             CURRENT_ERROR_HASH=$(get_ci_errors_hash "$PR_NUMBER")
 
-            # Check if we're stuck on same errors
+            # Check if we're stuck on same errors (abort if same errors 2x in a row)
             if [ -n "$LAST_ERROR_HASH" ] && [ "$CURRENT_ERROR_HASH" = "$LAST_ERROR_HASH" ]; then
                 CONSECUTIVE_SAME_ERRORS=$((CONSECUTIVE_SAME_ERRORS + 1))
                 echo "Warning: Same errors detected ($CONSECUTIVE_SAME_ERRORS consecutive time(s))"
 
-                if [ $CONSECUTIVE_SAME_ERRORS -ge 2 ]; then
+                # Abort if same errors detected twice in a row (CONSECUTIVE_SAME_ERRORS starts at 0,
+                # increments when same error seen, so >= 1 means second consecutive occurrence)
+                if [ $CONSECUTIVE_SAME_ERRORS -ge 1 ]; then
                     echo ""
                     echo "ERROR: Stuck on same errors after 2 fix attempts"
                     echo "These errors may require manual intervention"
@@ -312,6 +314,21 @@ while [ $ITERATION -le $MAX_CI_ITERATIONS ]; do
                 echo "Warning: /github:fix-ci command failed"
                 notify "ERROR" "$WORKFLOW_ID" "CI_FIX_FAILED" "Fix command failed at iteration $ITERATION"
                 # Continue to next iteration anyway
+            fi
+
+            # Stage and commit changes made by fix-ci
+            echo ""
+            echo "Staging and committing fixes..."
+
+            if git diff --quiet && git diff --staged --quiet; then
+                echo "No changes to commit (fix-ci may not have made changes)"
+            else
+                git add .
+                if ! git commit -m "fix(ci): automated fix attempt $ITERATION
+
+Applied fixes from /github:fix-ci (iteration $ITERATION/$MAX_CI_ITERATIONS)"; then
+                    echo "Warning: git commit failed (may have no changes)"
+                fi
             fi
 
             # Push changes
