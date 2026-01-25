@@ -1,6 +1,6 @@
 {
   "name": "workflows",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Autonomous workflow orchestration for the full SDLC pipeline - from research to PR submission",
   "author": {
     "name": "Ladislav Martincik",
