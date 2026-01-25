@@ -1,33 +1,82 @@
 #!/usr/bin/env bash
 #
-# ci-ralph.sh - Autonomous CI resolution loop
+# ci-ralph.sh - Autonomous CI resolution loop (AFK Ralph pattern)
 #
 # Continuously monitors and fixes CI failures until success or max iterations.
 # Called by workflow-ralph.sh after PR creation.
 #
+# Features:
+#   - Docker sandbox mode for AFK safety (USE_SANDBOX=true)
+#   - YOLO mode to skip permission prompts (YOLO_MODE=true)
+#   - jq streaming for real-time output
+#   - Stuck detection (same errors 2x)
+#
 # Usage:
 #   ./scripts/ci-ralph.sh <pr-number>
 #
-# Flow:
-#   1. Parse and validate PR number argument
-#   2. Poll CI status until complete
-#   3. If failing, invoke /github:fix-ci
-#   4. Push changes and wait for new CI run
-#   5. Repeat up to MAX_CI_ITERATIONS times
-#   6. Detect stuck state (same errors 2x)
-#   7. Exit with success (0) or failure (1)
+#   # Full AFK mode (Docker + YOLO) - default
+#   ./ci-ralph.sh 123
+#
+#   # No sandbox (faster, less safe)
+#   USE_SANDBOX=false ./ci-ralph.sh 123
+#
+#   # Interactive mode (keep permission prompts)
+#   YOLO_MODE=false ./ci-ralph.sh 123
 
 set -euo pipefail
+
+# ============================================================================
+# AFK Ralph Configuration
+# ============================================================================
+
+# Docker sandbox mode (default: enabled for AFK safety)
+USE_SANDBOX="${USE_SANDBOX:-true}"
+
+# YOLO mode - skip all permission prompts
+YOLO_MODE="${YOLO_MODE:-true}"
+
+# Temp files for signal capture
+TMPDIR="${TMPDIR:-/tmp}"
+SIGNAL_LOG=""
+
+# jq filter for streaming assistant text
+JQ_STREAM='select(.type == "assistant").message.content[]? | select(.type == "text").text // empty'
+
+# jq filter for final result
+JQ_RESULT='select(.type == "result").result // empty'
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
 readonly NOTIFICATION_LOG="$HOME/.workflow-notifications.log"
-readonly MAX_CI_ITERATIONS=10
-readonly CI_START_TIMEOUT=120  # 2 minutes for CI to start
-readonly CI_RUN_TIMEOUT=1800   # 30 minutes for CI to complete
-readonly POLL_INTERVAL=30      # Poll every 30 seconds
+readonly MAX_CI_ITERATIONS="${MAX_CI_ITERATIONS:-10}"
+readonly CI_START_TIMEOUT="${CI_START_TIMEOUT:-120}"  # 2 minutes for CI to start
+readonly CI_RUN_TIMEOUT="${CI_RUN_TIMEOUT:-1800}"     # 30 minutes for CI to complete
+readonly POLL_INTERVAL="${POLL_INTERVAL:-30}"         # Poll every 30 seconds
+readonly VERBOSE="${VERBOSE:-false}"
+
+# ============================================================================
+# Cleanup and Trap Handler
+# ============================================================================
+
+cleanup() {
+    local exit_code=$?
+    echo ""
+    echo "Cleaning up..."
+
+    # Remove temp files
+    [ -n "$SIGNAL_LOG" ] && [ -f "$SIGNAL_LOG" ] && rm -f "$SIGNAL_LOG"
+
+    # Stop Docker sandbox if running
+    if [ "$USE_SANDBOX" = "true" ]; then
+        docker sandbox stop claude 2>/dev/null || true
+    fi
+
+    exit $exit_code
+}
+
+trap cleanup EXIT SIGINT SIGTERM
 
 # ============================================================================
 # Utilities
@@ -64,6 +113,13 @@ Arguments:
 Example:
   $0 123
 
+Environment Variables:
+  USE_SANDBOX         Docker sandbox mode (default: true)
+  YOLO_MODE           Skip permission prompts (default: true)
+  MAX_CI_ITERATIONS   Max fix iterations (default: 10)
+  CI_RUN_TIMEOUT      CI run timeout in seconds (default: 1800)
+  VERBOSE             Show raw jq output (default: false)
+
 The script will:
   1. Poll CI status for the PR
   2. Fix failures with /github:fix-ci
@@ -71,49 +127,80 @@ The script will:
   4. Repeat up to $MAX_CI_ITERATIONS times
   5. Abort if stuck (same errors 2x)
 
-Configuration:
-  MAX_CI_ITERATIONS=$MAX_CI_ITERATIONS
-  CI_TIMEOUT=${CI_RUN_TIMEOUT}s per iteration
-  CI_START_TIMEOUT=${CI_START_TIMEOUT}s wait for CI start
-
 EOF
     exit 1
 }
 
 # ============================================================================
-# Argument Parsing
+# Claude Invocation Function
 # ============================================================================
 
-if [ $# -eq 0 ]; then
-    usage
-fi
+run_claude() {
+    local prompt="$1"
+    local capture_file="${2:-}"
 
-PR_NUMBER="$1"
+    # Build command
+    local cmd=""
+    if [ "$USE_SANDBOX" = "true" ]; then
+        cmd="docker sandbox run --credentials host claude"
+    else
+        cmd="claude"
+    fi
 
-# Validate PR number is a positive integer
-if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || [ "$PR_NUMBER" -le 0 ]; then
-    error "Invalid PR number: $PR_NUMBER (must be positive integer)"
-fi
+    # Add YOLO mode
+    if [ "$YOLO_MODE" = "true" ]; then
+        cmd="$cmd --dangerously-skip-permissions"
+    fi
 
-WORKFLOW_ID="pr-$PR_NUMBER"
+    # Add output format
+    cmd="$cmd --print --output-format stream-json"
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "CI Ralph - Autonomous CI Resolution"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "PR Number: #$PR_NUMBER"
-echo "Max Iterations: $MAX_CI_ITERATIONS"
-echo "CI Timeout: ${CI_RUN_TIMEOUT}s"
-echo ""
+    # Create temp file for capture
+    SIGNAL_LOG=$(mktemp "$TMPDIR/ralph-signal.XXXXXX")
 
-notify "STARTED" "$WORKFLOW_ID" "CI_RESOLUTION" "Beginning CI fix loop for PR #$PR_NUMBER"
+    # Execute with streaming + capture
+    if [ "$VERBOSE" = "true" ]; then
+        eval "$cmd \"$prompt\"" 2>&1 \
+            | grep --line-buffered '^{' \
+            | tee "$SIGNAL_LOG" \
+            | jq --unbuffered -rj "$JQ_STREAM"
+    else
+        eval "$cmd \"$prompt\"" 2>&1 \
+            | grep --line-buffered '^{' \
+            | tee "$SIGNAL_LOG" \
+            | jq --unbuffered -rj "$JQ_STREAM" 2>/dev/null || true
+    fi
+
+    local exit_code=${PIPESTATUS[0]}
+
+    # Extract final result if capture file specified
+    if [ -n "$capture_file" ]; then
+        jq -r "$JQ_RESULT" "$SIGNAL_LOG" > "$capture_file" 2>/dev/null || true
+    fi
+
+    return $exit_code
+}
 
 # ============================================================================
-# Utility Functions
+# Signal Detection
+# ============================================================================
+
+check_completion() {
+    local log_file="$1"
+
+    if grep -q '<promise>COMPLETE</promise>' "$log_file" 2>/dev/null; then
+        return 0  # Complete
+    elif grep -q '<promise>FAILED</promise>' "$log_file" 2>/dev/null; then
+        return 1  # Failed
+    fi
+    return 2  # Continue
+}
+
+# ============================================================================
+# CI Utility Functions
 # ============================================================================
 
 # Wait for CI to complete
-# Args: pr_number, timeout_seconds
-# Returns: 0 if complete, 1 if timeout
 wait_for_ci_complete() {
     local pr="$1"
     local timeout="$2"
@@ -149,8 +236,6 @@ wait_for_ci_complete() {
 }
 
 # Check CI status
-# Args: pr_number
-# Returns: "passing", "failing", "pending", or "error"
 get_ci_status() {
     local pr="$1"
 
@@ -183,9 +268,7 @@ get_ci_status() {
     echo "passing"
 }
 
-# Get CI error summary
-# Args: pr_number
-# Returns: SHA256 hash of error messages (for detecting stuck state)
+# Get CI error summary hash (for detecting stuck state)
 get_ci_errors_hash() {
     local pr="$1"
 
@@ -203,11 +286,8 @@ get_ci_errors_hash() {
 }
 
 # Wait for new CI run to start after push
-# Args: pr_number, push_timestamp
-# Returns: 0 if started, 1 if timeout
 wait_for_ci_start() {
     local pr="$1"
-    local push_time="$2"
     local timeout="$CI_START_TIMEOUT"
     local start_time
     start_time=$(date +%s)
@@ -219,11 +299,9 @@ wait_for_ci_start() {
 
         if [ $elapsed -ge $timeout ]; then
             echo "Warning: No new CI run detected after ${timeout}s"
-            echo "CI may not be configured for this PR"
             return 1
         fi
 
-        # Check if CI has started running
         local ci_status
         ci_status=$(get_ci_status "$pr")
 
@@ -238,16 +316,44 @@ wait_for_ci_start() {
 }
 
 # ============================================================================
+# Argument Parsing
+# ============================================================================
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+PR_NUMBER="$1"
+
+# Validate PR number is a positive integer
+if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || [ "$PR_NUMBER" -le 0 ]; then
+    error "Invalid PR number: $PR_NUMBER (must be positive integer)"
+fi
+
+WORKFLOW_ID="pr-$PR_NUMBER"
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "CI Ralph - AFK Autonomous CI Resolution"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "PR Number: #$PR_NUMBER"
+echo "Sandbox: $USE_SANDBOX"
+echo "YOLO Mode: $YOLO_MODE"
+echo "Max Iterations: $MAX_CI_ITERATIONS"
+echo "CI Timeout: ${CI_RUN_TIMEOUT}s"
+echo ""
+
+notify "STARTED" "$WORKFLOW_ID" "CI_RESOLUTION" "Beginning CI fix loop (sandbox=$USE_SANDBOX, yolo=$YOLO_MODE)"
+
+# ============================================================================
 # Main CI Fix Loop
 # ============================================================================
 
-ITERATION=1
 LAST_ERROR_HASH=""
 CONSECUTIVE_SAME_ERRORS=0
 
-while [ $ITERATION -le $MAX_CI_ITERATIONS ]; do
+for ((i=1; i<=MAX_CI_ITERATIONS; i++)); do
     echo ""
-    echo "━━━ CI Fix Iteration $ITERATION/$MAX_CI_ITERATIONS ━━━"
+    echo "━━━ CI Fix Iteration $i/$MAX_CI_ITERATIONS ━━━"
     echo ""
 
     # Check current CI status
@@ -260,14 +366,14 @@ while [ $ITERATION -le $MAX_CI_ITERATIONS ]; do
         passing)
             echo ""
             echo "✓ CI is passing!"
-            notify "SUCCESS" "$WORKFLOW_ID" "CI_COMPLETE" "CI checks passed after $ITERATION iteration(s)"
+            notify "SUCCESS" "$WORKFLOW_ID" "CI_COMPLETE" "CI checks passed after $i iteration(s)"
             exit 0
             ;;
 
         pending)
             echo "CI is still running, waiting for completion..."
             if ! wait_for_ci_complete "$PR_NUMBER" "$CI_RUN_TIMEOUT"; then
-                notify "ERROR" "$WORKFLOW_ID" "CI_TIMEOUT" "CI run timeout at iteration $ITERATION"
+                notify "ERROR" "$WORKFLOW_ID" "CI_TIMEOUT" "CI run timeout at iteration $i"
                 error "CI run timed out after ${CI_RUN_TIMEOUT}s"
             fi
             # After wait completes, loop will re-check status
@@ -280,13 +386,11 @@ while [ $ITERATION -le $MAX_CI_ITERATIONS ]; do
             # Get error hash for stuck detection
             CURRENT_ERROR_HASH=$(get_ci_errors_hash "$PR_NUMBER")
 
-            # Check if we're stuck on same errors (abort if same errors 2x in a row)
+            # Check if stuck on same errors
             if [ -n "$LAST_ERROR_HASH" ] && [ "$CURRENT_ERROR_HASH" = "$LAST_ERROR_HASH" ]; then
                 CONSECUTIVE_SAME_ERRORS=$((CONSECUTIVE_SAME_ERRORS + 1))
                 echo "Warning: Same errors detected ($CONSECUTIVE_SAME_ERRORS consecutive time(s))"
 
-                # Abort if same errors detected twice in a row (CONSECUTIVE_SAME_ERRORS starts at 0,
-                # increments when same error seen, so >= 1 means second consecutive occurrence)
                 if [ $CONSECUTIVE_SAME_ERRORS -ge 1 ]; then
                     echo ""
                     echo "ERROR: Stuck on same errors after 2 fix attempts"
@@ -295,11 +399,10 @@ while [ $ITERATION -le $MAX_CI_ITERATIONS ]; do
                     echo "Failed checks:"
                     gh pr checks "$PR_NUMBER" 2>/dev/null | grep -E "(fail|×)" || true
                     echo ""
-                    notify "ERROR" "$WORKFLOW_ID" "CI_STUCK" "Stuck on same errors after $ITERATION iterations"
+                    notify "ERROR" "$WORKFLOW_ID" "CI_STUCK" "Stuck on same errors after $i iterations"
                     error "CI fix loop stuck - same errors detected twice in a row"
                 fi
             else
-                # Different errors, reset counter
                 CONSECUTIVE_SAME_ERRORS=0
             fi
 
@@ -308,65 +411,53 @@ while [ $ITERATION -le $MAX_CI_ITERATIONS ]; do
             # Invoke fix-ci command
             echo ""
             echo "Invoking /github:fix-ci to resolve failures..."
-            notify "PROGRESS" "$WORKFLOW_ID" "CI_FIX" "Attempting fix $ITERATION/$MAX_CI_ITERATIONS"
+            notify "PROGRESS" "$WORKFLOW_ID" "CI_FIX" "Attempting fix $i/$MAX_CI_ITERATIONS"
 
-            if ! claude -p "/github:fix-ci" --output-format stream-json 2>&1; then
-                echo "Warning: /github:fix-ci command failed"
-                notify "ERROR" "$WORKFLOW_ID" "CI_FIX_FAILED" "Fix command failed at iteration $ITERATION"
-                # Continue to next iteration anyway
-            fi
+            run_claude "/github:fix-ci" || true
 
-            # Stage and commit changes made by fix-ci
+            # Commit and push if changes
             echo ""
             echo "Staging and committing fixes..."
 
-            if git diff --quiet && git diff --staged --quiet; then
-                echo "No changes to commit (fix-ci may not have made changes)"
-            else
+            if ! git diff --quiet || ! git diff --staged --quiet; then
                 git add .
-                if ! git commit -m "fix(ci): automated fix attempt $ITERATION
+                git commit -m "fix(ci): automated fix attempt $i
 
-Applied fixes from /github:fix-ci (iteration $ITERATION/$MAX_CI_ITERATIONS)"; then
-                    echo "Warning: git commit failed (may have no changes)"
+Applied fixes from /github:fix-ci (iteration $i/$MAX_CI_ITERATIONS)" || echo "Warning: commit failed"
+
+                # Push changes
+                echo ""
+                echo "Pushing fixes to trigger new CI run..."
+
+                if ! git push origin HEAD 2>&1; then
+                    notify "ERROR" "$WORKFLOW_ID" "PUSH_FAILED" "Push failed at iteration $i"
+                    error "Failed to push changes for CI re-run"
                 fi
-            fi
 
-            # Push changes
-            echo ""
-            echo "Pushing fixes to trigger new CI run..."
-            PUSH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                echo "Changes pushed"
 
-            if ! git push origin HEAD 2>&1; then
-                echo "Warning: git push failed"
-                notify "ERROR" "$WORKFLOW_ID" "PUSH_FAILED" "Push failed at iteration $ITERATION"
-                error "Failed to push changes for CI re-run"
-            fi
+                # Wait for new CI run to start
+                if ! wait_for_ci_start "$PR_NUMBER"; then
+                    echo "Warning: Could not detect new CI run"
+                    sleep "$POLL_INTERVAL"
+                fi
 
-            echo "Changes pushed at $PUSH_TIME"
-
-            # Wait for new CI run to start
-            if ! wait_for_ci_start "$PR_NUMBER" "$PUSH_TIME"; then
-                echo "Warning: Could not detect new CI run"
-                echo "Waiting $POLL_INTERVAL seconds before checking status..."
-                sleep "$POLL_INTERVAL"
-            fi
-
-            # Wait for CI run to complete
-            echo ""
-            if ! wait_for_ci_complete "$PR_NUMBER" "$CI_RUN_TIMEOUT"; then
-                notify "ERROR" "$WORKFLOW_ID" "CI_TIMEOUT" "CI run timeout at iteration $ITERATION"
-                error "CI run timed out after ${CI_RUN_TIMEOUT}s"
+                # Wait for CI run to complete
+                if ! wait_for_ci_complete "$PR_NUMBER" "$CI_RUN_TIMEOUT"; then
+                    notify "ERROR" "$WORKFLOW_ID" "CI_TIMEOUT" "CI run timeout at iteration $i"
+                    error "CI run timed out after ${CI_RUN_TIMEOUT}s"
+                fi
+            else
+                echo "No changes to commit (fix-ci may not have made changes)"
             fi
             ;;
 
         error)
-            echo "Error: Could not get CI status (PR may not exist or no checks configured)"
+            echo "Error: Could not get CI status"
             notify "ERROR" "$WORKFLOW_ID" "CI_STATUS_ERROR" "Could not get CI status for PR #$PR_NUMBER"
             error "Failed to get CI status for PR #$PR_NUMBER"
             ;;
     esac
-
-    ITERATION=$((ITERATION + 1))
 done
 
 # Max iterations reached
