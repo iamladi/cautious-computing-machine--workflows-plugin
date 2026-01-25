@@ -33,6 +33,18 @@ Orchestrate the full SDLC pipeline from research file to merged PR.
 - `research-file` - Path to research file (e.g., `research/my-feature.md`)
 - `--continue` - Resume from last checkpoint
 
+### `/resolve-comments`
+
+Address PR review comments autonomously.
+
+**Usage:**
+```bash
+/workflows:resolve-comments <pr-number>
+```
+
+**Arguments:**
+- `pr-number` - GitHub PR number to resolve comments for
+
 ## Workflow Phases
 
 The build command executes four phases:

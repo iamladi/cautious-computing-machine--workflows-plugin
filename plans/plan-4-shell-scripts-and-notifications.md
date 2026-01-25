@@ -1,7 +1,7 @@
 ---
 title: "Workflows Plugin - Shell Scripts & Notifications"
 type: Feature
-issue: null
+issue: 1
 research: [research/research-autonomous-workflow-build.md]
 status: Draft
 created: 2026-01-25
