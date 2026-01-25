@@ -1,0 +1,20 @@
+{
+  "name": "workflows",
+  "version": "0.1.0",
+  "description": "Autonomous workflow orchestration for the full SDLC pipeline - from research to PR submission",
+  "author": {
+    "name": "Ladislav Martincik",
+    "email": "ladislav.martincik@example.com",
+    "url": "https://github.com/iamladi"
+  },
+  "homepage": "https://github.com/iamladi/workflows-plugin",
+  "repository": "https://github.com/iamladi/workflows-plugin",
+  "license": "MIT",
+  "keywords": [
+    "workflows",
+    "automation",
+    "sdlc",
+    "orchestration",
+    "claude-code"
+  ]
+}
