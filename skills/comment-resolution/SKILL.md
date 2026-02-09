@@ -278,12 +278,12 @@ For each comment in your file group:
 3. For actionable-unclear: Prepare reply text (DO NOT post yet)
 4. For not-actionable: Skip and log reason
 
-CRITICAL CONSTRAINTS:
-- NO git commits (lead will commit all changes in controlled order)
-- NO AskUserQuestion (you can't interact with the user)
-- NO GitHub API calls to post replies (lead will post all replies)
-- NO build or test commands
-- Read files completely without limit/offset
+WORKING CONSTRAINTS:
+You're one of several agents resolving comments in parallel. This means:
+- Don't run git commands or post GitHub API replies — the lead commits all changes in controlled order and posts all replies to maintain a consistent PR narrative.
+- Don't run build or test commands — they'd interfere with other teammates' edits happening concurrently.
+- Communicate only via SendMessage (no user interaction available in team context).
+- Read files completely without limit/offset so you have full context for accurate fixes.
 
 CROSS-FILE IMPACT SHARING:
 If your fix changes an interface, export, type, or function signature that other files might depend on:
@@ -297,18 +297,13 @@ When all comments in your group are processed:
 2. Send "COMMENTS RESOLVED" via SendMessage with your summary
 3. Wait for shutdown_request
 
-OUTPUT FORMAT:
-{
-  "edits": [
-    {"file": "path/to/file.ts", "comment_id": 123, "description": "Changed let to const"}
-  ],
-  "replies": [
-    {"comment_id": 456, "body": "Fixed in {will-add-sha}"}
-  ],
-  "skipped": [
-    {"comment_id": 789, "reason": "Approval comment"}
-  ]
-}
+COMPLETION SUMMARY:
+When done, report your results via SendMessage so the lead can commit and post replies. Include:
+- Edits made (file, comment ID, what changed)
+- Replies to post (comment ID, reply text — use "{will-add-sha}" placeholder for commit refs the lead will fill in)
+- Skipped comments (comment ID, reason for skipping)
+
+Structure this clearly — the lead needs to parse it to stage commits and post replies in the correct order.
 ```
 
 ### Lead Handles General Comments
