@@ -5,6 +5,7 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
 
 jobs:
   validate:
@@ -24,6 +25,12 @@ jobs:
 
       - name: Validate plugin (versions, schema, skills, docs)
         run: bun run validate
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Run tests
+        run: bun test
 
       - name: Validate shell scripts syntax
         run: |

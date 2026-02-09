@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - 2026-02-09
+## [0.3.0] - 2026-02-09
 
 ### Added
 
@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enhanced final report with team statistics
   - Feature flag validation with graceful fallback to sequential mode
   - Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+
+## [0.2.0] - 2026-01-25
+
+### Added
+- TypeScript runner infrastructure with XState state machine
+- Phase commands for fresh-context execution:
+  - `/phase-setup` - Create worktree, initialize progress
+  - `/phase-plan` - Split research into implementation plans
+  - `/phase-impl` - Execute single implementation plan
+  - `/phase-submit` - Create and push PR
+  - `/phase-verify-ci` - Check CI status
+  - `/phase-fix-ci` - Fix CI failures
+  - `/phase-resolve-comments` - Handle reviewer feedback
+- CI resolution loop with retry limits (max 5 attempts)
+- Comment resolution loop with retry limits (max 10 attempts)
+- CLI entry point: `bun run src/cli.ts run <research-file>`
+- Unit tests for runner components (51 tests)
+
+### Changed
+- `/workflows:build` now spawns TypeScript runner as subprocess
+- Workflow continues through CI and comment resolution until PR is merge-ready
 
 ## [0.1.0] - 2026-01-25
 
